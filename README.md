@@ -1,306 +1,204 @@
-# Smart Tool Log Parser — Setup Guide
+# Smart Tool Log Parser
 
-## Quick Port Reference
+### Winner — Micron AI Challenge, National AI Student Challenge 2026
 
-| Port | Component |
-|------|-----------|
-| 3000 | Frontend (React/Vite) |
-| 5432 | TimescaleDB |
-| 6379 | Redis |
-| 8000 | DynamoDB |
-| 8080 | Pipeline API |
-| 8081 | Query API |
-| 8083 | WebSocket Alerts |
-| 8090 | Kafka UI |
-| 9001 | MinIO Console |
+## Author
+
+Application entirely created by **Jovan Wang**.
+
+An AI-powered log processing system for semiconductor manufacturing. It ingests equipment log files, classifies events using domain-grounded LLMs with few-shot RAG, detects statistical anomalies via Isolation Forest, routes by severity in real time, and learns from human feedback to improve over time.
 
 ---
 
-## What Is This Project?
+## Features
 
-This is a **log processing system** that:
+### AI-Powered Log Classification
 
-- Takes log files from manufacturing tools (machines that make semiconductors)
-- Reads and organizes the data
-- Detects urgent events (fires, equipment failures)
-- Stores everything in a database so engineers can search and analyze it
+- **Domain Grounding** — LLM prompts are anchored with a comprehensive semiconductor fab equipment context covering 15+ equipment types (PECVD, Etch, Lithography, CMP, ALD, Ion Implant, etc.), their common fault modes, and correct category mappings. This prevents hallucination and ensures classifications align with real fab failure modes.
+
+- **Few-Shot RAG (Retrieval-Augmented Generation)** — Previously human-approved events are stored in DynamoDB. On each new event, the system retrieves relevant approved examples from the same category, ranks them by machine similarity, and injects the best matches as few-shot examples into the LLM prompt. Cross-machine learning: an approval on one ETCH tool benefits all ETCH tools.
+
+- **Isolation Forest Anomaly Detection** — A scikit-learn Isolation Forest model runs alongside the LLM, scoring every event on a 7-dimensional feature vector (severity, confidence, category, field presence, message length, review flag). Events above the anomaly threshold are escalated to the review queue even if the LLM is confident — the two systems act as independent checks.
+
+- **Temporal Anomaly Detection** — For machines with multiple events in a batch, an LLM analyzes the time-series sequence for escalation patterns (monotonically increasing values, severity escalation, repeating fault codes at increasing frequency).
+
+### Core Capabilities
+
+- **Multi-format parsing** — Ingests JSON, XML, CSV, SYSLOG, and plain text log files
+- **Smart priority routing** — Events auto-routed by severity via Kafka (P0 Critical, P1 Error, P2 Info, Dead Letter)
+- **Real-time WebSocket alerts** — P0/P1 urgent events streamed to the dashboard instantly
+- **Human-in-the-loop feedback** — Low-confidence events go to a review queue; reviewer corrections feed back into future AI predictions, improving accuracy over time
+- **NL2SQL query engine** — Ask questions about logs in plain English; the system translates to SQL and queries TimescaleDB
+- **Confidence scoring** — Events scored 0.0-1.0 based on AI confidence, field completeness, and rule agreement; below-threshold events automatically routed to human review
+
+### Tech Stack
+
+**Backend:** Python 3.11, FastAPI, Kafka, TimescaleDB, DynamoDB, Redis, MinIO, scikit-learn
+**Frontend:** React, TypeScript, Vite, Recharts
+**AI:** OpenRouter (Nvidia Nemotron), Isolation Forest (scikit-learn)
+**Infrastructure:** Docker Compose (single command deployment)
 
 ---
 
-## Prerequisites
+## Getting Started
 
-**Required:**
+### Prerequisites
 
 - Docker Desktop v24+ (with Compose v2 included)
   - Verify: `docker --version` and `docker compose version`
 
-**NOT required:**
+Python, databases, and all other dependencies run inside Docker — no local installation needed.
 
-- Python installed on your machine (it runs inside Docker)
-- Virtual environment (venv) — Docker handles this
-- Any database software (TimescaleDB runs in Docker)
+### 1. Setup Environment Variables
 
----
+Create a `.env` file in the project root with your OpenRouter API key:
 
-## 1. Setup Environment Variables
+```
+AI_KEY=your_openrouter_api_key
+```
 
-- Create your own .env` file (stores passwords and API keys)
-- Add your AI / OpenRouter API key to this file
-
----
-
-## 2. Start Everything (One Command!)
+### 2. Start Everything
 
 ```bash
 docker compose up -d
 ```
 
-**What happens:**
+This downloads and starts all services (database, Kafka, Redis, MinIO, app containers). Takes 1-2 minutes on first run.
 
-- Docker downloads all the services (database, storage, etc.)
-- Starts everything automatically in the background
-- Takes 1-2 minutes on first run
-- `-d` flag means "run in background"
-
----
-
-## 3. Check If Everything Started
+### 3. Verify Services
 
 ```bash
 docker compose ps
 ```
 
-**You should see:**
+You should see:
 
-- ✅ **Infrastructure services** (timescaledb, kafka, redis, minio) — Status: "healthy" or "running"
-- ✅ **Init containers** (kafka-init, dynamodb-init, minio-init) — Status: "exited (0)" — **This is normal!** They run once then stop.
-- ✅ **App containers** (app-pipeline, app-consumer-hot, etc.) — Status: "running"
+- **Infrastructure** (timescaledb, kafka, redis, minio) — "healthy" or "running"
+- **Init containers** (kafka-init, dynamodb-init, minio-init) — "exited (0)" (this is normal)
+- **App containers** (app-pipeline, app-consumer-hot, etc.) — "running"
 
-**If something shows "unhealthy" or "restarting":**
+### 4. Access the App
 
-- Wait a bit longer (first startup can take 2-3 minutes)
-- Check logs: `docker compose logs app-pipeline`
+| Service           | URL                        | Purpose                    |
+| ----------------- | -------------------------- | -------------------------- |
+| **Frontend**      | http://localhost:3000      | Web dashboard              |
+| **Pipeline API**  | http://localhost:8080/docs | Upload log files           |
+| **Query API**     | http://localhost:8081/docs | Natural language queries   |
+| **pgAdmin**       | http://localhost:5050      | Visual database browser    |
+| **MinIO Console** | http://localhost:9001      | Browse uploaded files      |
+| **Kafka UI**      | http://localhost:8090      | Message flow visualization |
 
----
-
-## Understanding the Stack (Simple Version)
-
-### TimescaleDB — The Database
-
-**What does it do?**
-
-- Stores all your log data (like an Excel spreadsheet, but for databases)
-- Organized to handle lots of time-stamped events (perfect for logs with timestamps)
-- Keeps everything organized in tables
-
-**Think of it like:**
-
-- A filing cabinet on your computer
-- Each log event gets filed and labeled by time
-- You can search and sort through thousands of logs instantly
-
-**Setup:**
-
-- ✅ Automatic — When you run `docker compose up`, it creates the database for you
-- ✅ Data is on your machine only — Your teammate's database is separate from yours
-- ✅ No manual work needed — All tables and folders are created automatically
-- Location: `localhost:5432` (password: `logparser_secret`)
-
----
-
-### MinIO — The File Storage
-
-**What does it do?**
-
-- Stores your log files (like Google Drive or Dropbox, but on your computer)
-- Keeps a backup copy of every file you upload
-- Organized into "buckets" (like folders)
-
-**Think of it like:**
-
-- A cloud storage system, but running locally on your machine
-- When you upload a log file, it gets saved here first before processing
-- Two folders: one for raw files, one for processed files
-
-**Setup:**
-
-- ✅ Automatic — When you run `docker compose up`, the folders are created for you
-- ✅ Data is on your machine only — Your teammate's storage is separate
-- ✅ No manual work needed — Just run the command
-- Access: http://localhost:9001 (username: `minioadmin`, password: `minioadmin123`)
-
----
-
-### The Key Point
-
-- **Both TimescaleDB and MinIO run inside Docker**
-- **Each person on your team gets their own copy** when they run `docker compose up`
-- **Teammates don't need to set them up manually** — it's all automatic
-- **Their data stays on their machine** — not shared with you
-
----
-
-## Service URLs (Where to Access Things)
-
-| Service              | URL                           | What It Does                                                  |
-| -------------------- | ----------------------------- | ------------------------------------------------------------- |
-| **Pipeline API**     | http://localhost:8080/docs    | Upload log files here                                         |
-| **Query API**        | http://localhost:8081/docs    | Ask questions about logs using natural language               |
-| **WebSocket Alerts** | ws://localhost:8083/ws/alerts | Real-time notifications (P0/P1 urgent logs)                   |
-| **Kafka UI**         | http://localhost:8090         | Visualize message flow (for debugging)                        |
-| **MinIO Console**    | http://localhost:9001         | Browse uploaded files (login: `minioadmin` / `minioadmin123`) |
-| **TimescaleDB**      | localhost:5432                | Database (user: `logparser` / password: `logparser_secret`)   |
-| **DynamoDB**         | http://localhost:8000         | Database for low-confidence events (for data review)          |
-| **Redis**            | localhost:6379                | Duplicate detection (caching)                                 |
-
-**Quick tip:** Open pipeline and query APIs in your browser — they have interactive documentation!
-
----
-
-## Common Commands (Cheat Sheet)
-
-### Viewing Logs & Status
+### 5. Run a Demo
 
 ```bash
-# See what all containers are doing (real-time)
+# Generate 100 realistic test logs
+python generate_simulation_data.py
+
+# Run two-phase streaming demo (uploads files, demonstrates human feedback loop)
+python simulate_stream.py
+```
+
+---
+
+## Quick Port Reference
+
+| Port | Component                  |
+| ---- | -------------------------- |
+| 3000 | Frontend (React/Vite)      |
+| 5050 | pgAdmin (Database Browser) |
+| 5432 | TimescaleDB                |
+| 6379 | Redis                      |
+| 8000 | DynamoDB                   |
+| 8080 | Pipeline API               |
+| 8081 | Query API                  |
+| 8083 | WebSocket Alerts           |
+| 8090 | Kafka UI                   |
+| 9001 | MinIO Console              |
+
+---
+
+## Understanding the Stack
+
+### TimescaleDB — The Main Database
+
+Stores all log events, review queue items, and review decisions. Organized as time-series hypertables with automatic retention policies.
+
+- Tables: `log_events`, `normalized_events`, `review_queue_status`
+- Location: `localhost:5432` (user: `logparser`, password: `logparser_secret`)
+- Setup: Automatic via Docker
+
+### DynamoDB — The Feedback Loop Storage
+
+Stores normalization rules (field aliases), confidence boosts from previous approvals, and approved events for RAG few-shot learning. Does NOT store the review queue itself.
+
+- Tables: `normalization-rules`, `approved-events`
+- Access: http://localhost:8000
+
+### MinIO — File Storage
+
+S3-compatible object storage for raw and processed log files.
+
+- Access: http://localhost:9001 (login: `minioadmin` / `minioadmin123`)
+- Setup: Automatic via Docker
+
+---
+
+## Using pgAdmin
+
+**Access:** http://localhost:5050 (Email: `admin@example.com`, Password: `admin`)
+
+**First Time Setup:**
+
+1. Click "Add New Server"
+2. General tab — Name: `logparser-db`
+3. Connection tab — Hostname: `timescaledb`, Port: `5432`, Database: `logparser_db`, Username: `logparser`, Password: `logparser_secret`
+
+---
+
+## Common Commands
+
+```bash
+# View logs (real-time)
 docker compose logs -f
 
-# See logs from one service only
+# View one service
 docker compose logs -f app-pipeline
 
-# Check what's running right now
-docker compose ps
-```
-
-### Restarting After Code Changes
-
-```bash
-# Rebuild and restart the pipeline container
+# Rebuild after code changes
 docker compose up -d --build app-pipeline
 
-# Rebuild and restart ALL app containers
-docker compose up -d --build app-pipeline app-consumer-hot app-consumer-cold app-consumer-deadletter app-query
-```
-
-### Accessing the Database
-
-```bash
-# Open a terminal inside the TimescaleDB container
+# Access database CLI
 docker exec -it timescaledb psql -U logparser -d logparser_db
 
-# Run a quick query (example: count logs)
-docker exec -it timescaledb psql -U logparser -d logparser_db \
-  -c "SELECT priority, COUNT(*) FROM log_events GROUP BY priority;"
-```
-
-### Inspecting Kafka (Message Queue)
-
-```bash
-# List all topics
-docker exec -it kafka kafka-topics --list --bootstrap-server localhost:9092
-
-# Check if messages are flowing
-docker exec -it kafka kafka-consumer-groups \
-  --bootstrap-server localhost:9092 --describe \
-  --group consumer-group-hot
-```
-
-### Checking Redis (Duplicate Detection)
-
-```bash
-# See all keys stored
-docker exec -it redis redis-cli keys "*"
-```
-
-### Stopping & Cleaning Up
-
-```bash
-# Stop everything (data is saved)
+# Stop (data preserved)
 docker compose down
 
-# Stop everything AND delete all data (fresh start)
+# Full reset (deletes all data)
 docker compose down -v
+
+# Reset script (wipes TimescaleDB but keeps DynamoDB feedback rules)
+./reset.sh
 ```
-
----
-
-## Placing Test Log Files
-
-**Want to test the system?**
-
-- Create a folder: `synthetic-logs/` in the project root
-- Drop your test log files here (`.json`, `.xml`, `.csv`, `.log`, `.txt`, etc.)
-- The pipeline reads from this folder automatically
-- Files are not changed (read-only mount)
 
 ---
 
 ## Troubleshooting
 
-### "App containers can't connect to database/kafka"
+**"App containers can't connect to database/kafka"**
+Use Docker service names inside containers, not `localhost`:
 
-**Problem:** Connection refused error in logs
+- Database: `timescaledb:5432` | Kafka: `kafka:29092` | Redis: `redis:6379` | MinIO: `minio:9000`
 
-**Solution:** Use the Docker service names, NOT `localhost`
+**"Something is taking forever to start"**
+First startup is slow. Check `docker compose logs -f`. If stuck >3 minutes: `docker compose down && docker compose up -d`
 
-- ❌ Wrong: `localhost:5432`
-- ✅ Right: `timescaledb:5432`
+**"Schema errors in database"**
+Re-run the schema: `docker exec -i timescaledb psql -U logparser -d logparser_db < init/timescale/01_schema.sql`
 
-**Service names to use inside containers:**
+**"Port already in use"**
+Edit `docker-compose.yml` and change the host port (first number): `"5433:5432"`
 
-- Database: `timescaledb:5432`
-- Kafka: `kafka:29092`
-- Redis: `redis:6379`
-- MinIO: `minio:9000`
-
----
-
-### "Something is taking forever to start"
-
-**What to do:**
-
-1. Check logs: `docker compose logs -f`
-2. Wait a bit more (first startup is slow)
-3. If stuck for more than 3 minutes, restart: `docker compose down && docker compose up -d`
+**"I want to start fresh"**
+`docker compose down -v && docker compose up -d`
 
 ---
-
-### "Schema errors in database"
-
-**If the database tables don't exist:**
-
-```bash
-docker exec -i timescaledb psql -U logparser -d logparser_db \
-  < init/timescale/01_schema.sql
-```
-
-This runs the schema file again.
-
----
-
-### "Port already in use" (e.g., port 5432 is taken)
-
-**Problem:** Another app is using the same port
-
-**Solution:** Edit `docker-compose.yml` and change the first number:
-
-```yaml
-# Change this line (5432 is already used):
-ports:
-  - "5432:5432"
-
-# To this (use a different port on your machine):
-ports:
-  - "5433:5432"  # Now access database at localhost:5433
-```
-
----
-
-### "I want to start fresh with no data"
-
-```bash
-docker compose down -v
-docker compose up -d
-```
-
-This deletes all data and starts clean.

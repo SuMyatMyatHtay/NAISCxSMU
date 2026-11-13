@@ -107,6 +107,7 @@ async def init_schema():
                 ai_root_cause TEXT,
                 ai_recommended_action TEXT,
                 confidence_score FLOAT,
+                novelty_score FLOAT,
                 requires_review BOOLEAN DEFAULT FALSE,
                 review_reason TEXT,
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
@@ -151,6 +152,23 @@ async def init_schema():
         """)
         logger.info("Created review_queue_status table")
 
+        # Create trend_alerts table (temporal anomaly detection results)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS trend_alerts (
+                id BIGSERIAL PRIMARY KEY,
+                machine TEXT NOT NULL,
+                pattern TEXT NOT NULL,
+                predicted_severity TEXT NOT NULL,
+                estimated_time_to_critical TEXT,
+                recommended_action TEXT,
+                confidence FLOAT,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_trend_alerts_machine ON trend_alerts (machine)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_trend_alerts_created ON trend_alerts (created_at DESC)")
+        logger.info("Created trend_alerts table")
+
         # Create categories table (reviewer-managed list of valid event categories)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS categories (
@@ -167,6 +185,12 @@ async def init_schema():
             ON CONFLICT (name) DO NOTHING;
         """)
         logger.info("Created and seeded categories table")
+
+        # Idempotent column migration — adds novelty_score if this is an existing DB
+        await conn.execute("""
+            ALTER TABLE normalized_events ADD COLUMN IF NOT EXISTS novelty_score FLOAT;
+        """)
+        logger.info("Ensured novelty_score column on normalized_events")
 
         # Create indexes for common queries
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_logs_timestamp ON raw_logs (timestamp DESC)")
@@ -249,12 +273,13 @@ async def insert_normalized_event(
     confidence_score: float,
     requires_review: bool,
     review_reason: Optional[str] = None,
+    novelty_score: Optional[float] = None,
 ) -> bool:
     """Insert a normalized event."""
     logger.info(
         "▶▶▶ [DB] insert_normalized_event called  job_id=%s  source=%s  severity=%s  "
-        "requires_review=%s  confidence=%.2f",
-        job_id, source, severity, requires_review, confidence_score,
+        "requires_review=%s  confidence=%.2f  novelty=%.4f",
+        job_id, source, severity, requires_review, confidence_score, novelty_score or 0.0,
     )
     try:
         pool = await get_pool()
@@ -267,14 +292,14 @@ async def insert_normalized_event(
                 INSERT INTO normalized_events (
                     job_id, timestamp, source, event_type, severity, message,
                     ai_category, ai_root_cause, ai_recommended_action,
-                    confidence_score, requires_review, review_reason
+                    confidence_score, novelty_score, requires_review, review_reason
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                 ON CONFLICT (job_id, timestamp) DO NOTHING
             """,
             job_id, timestamp, source, event_type, severity, message,
             ai_category, ai_root_cause, ai_recommended_action,
-            confidence_score, requires_review, review_reason,
+            confidence_score, novelty_score, requires_review, review_reason,
             )
         logger.info("▶▶▶ [DB] insert_normalized_event OK  job_id=%s", job_id)
         return True
@@ -587,3 +612,55 @@ async def insert_category(name: str) -> bool:
     except Exception as e:
         logger.error(f"Failed to insert category '{name}': {e}")
         return False
+
+
+# ── Trend Alerts ──────────────────────────────────────────────────────────────
+
+async def insert_trend_alert(alert: dict) -> bool:
+    """Persist a temporal anomaly alert returned by detect_temporal_anomaly()."""
+    pool = await get_pool()
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO trend_alerts
+                    (machine, pattern, predicted_severity, estimated_time_to_critical,
+                     recommended_action, confidence)
+                VALUES ($1, $2, $3, $4, $5, $6)
+            """,
+            alert.get("machine", "unknown"),
+            alert.get("pattern", ""),
+            alert.get("predicted_severity", "warning"),
+            alert.get("estimated_time_to_critical", "N/A"),
+            alert.get("recommended_action", ""),
+            float(alert.get("confidence", 0.0)),
+            )
+        logger.info("Inserted trend alert for machine=%s", alert.get("machine"))
+        return True
+    except Exception as e:
+        logger.error("Failed to insert trend alert: %s", e)
+        return False
+
+
+async def get_trend_alerts(limit: int = 50) -> List[Dict[str, Any]]:
+    """Return the most recent trend alerts, newest first."""
+    pool = await get_pool()
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT id, machine, pattern, predicted_severity,
+                       estimated_time_to_critical, recommended_action,
+                       confidence, created_at
+                FROM trend_alerts
+                ORDER BY created_at DESC
+                LIMIT $1
+            """, limit)
+        return [
+            {
+                **dict(row),
+                "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+            }
+            for row in rows
+        ]
+    except Exception as e:
+        logger.error("Failed to fetch trend alerts: %s", e)
+        return []
